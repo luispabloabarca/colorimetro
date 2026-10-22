@@ -97,8 +97,14 @@ canvas.plot{width:100%;max-width:360px;aspect-ratio:1;border:1px solid var(--lin
 
 /* Clases */
 .cls{display:grid;grid-template-columns:28px minmax(0,1fr) 74px auto;gap:6px;align-items:center}
-.cls .sw{width:28px;height:28px;border-radius:6px;border:1px solid var(--line)}
+.cls .sw{width:28px;height:28px;border-radius:6px;border:1px solid var(--line);padding:0;background:none;cursor:pointer}
+.cls .sw::-webkit-color-swatch-wrapper{padding:0}
+.cls .sw::-webkit-color-swatch{border:0;border-radius:5px}
+.cls .sw::-moz-color-swatch{border:0;border-radius:5px}
 .cls .labv{grid-column:2/-1;font-size:.76rem}
+.labin{display:flex;gap:6px 10px;flex-wrap:wrap}
+.labin label{display:flex;align-items:center;gap:4px}
+.labin input{width:72px;padding:4px 6px}
 
 /* Ajustes */
 .ctl{display:grid;grid-template-columns:1fr auto;gap:2px 8px}
@@ -197,7 +203,7 @@ th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
 
     <section class="panel block" data-block="classes" data-title="Escala de puntaje">
       <div class="bb">
-        <p class="small muted">Cada píxel se asigna a la clase de color más cercana (ΔE*ab). El puntaje es el promedio ponderado de los valores de cada clase según su porcentaje. Para crear una clase, apunta a un patrón de referencia y pulsa <b>Capturar</b>.</p>
+        <p class="small muted">Cada píxel se asigna a la clase de color más cercana (ΔE*ab). El puntaje es el promedio ponderado de los valores de cada clase según su porcentaje. Define el color de cada clase de tres formas: apunta a un patrón y pulsa <b>Capturar</b> (lo más exacto), escribe L*, a*, b* a mano, o toca el cuadro de color para elegirlo.</p>
         <div id="clsList" style="display:flex;flex-direction:column;gap:10px"></div>
         <div class="row">
           <button id="btnAddCls" type="button">Agregar clase</button>

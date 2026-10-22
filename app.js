@@ -82,6 +82,13 @@ function labToHex(L,a,b){
   return '#'+[r,g,bb].map(c=>enc(c).toString(16).padStart(2,'0')).join('');
 }
 
+function hexToLab(hex){
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex); if (!m) return [50,0,0];
+  const v = parseInt(m[1], 16), out = [0,0,0];
+  linToLab(LIN[v>>16 & 255], LIN[v>>8 & 255], LIN[v & 255], out);
+  return out.map(x => Math.round(x*10)/10);
+}
+
 /* ---------- Estado ---------- */
 const DEFAULT_CLASSES = [
   {name:'Claro (ejemplo)',  w:0,   lab:[72,6,32]},
@@ -358,30 +365,40 @@ function classesChanged(){
   store.set('classes', classes); packClasses(); lastSum = null;
   buildDist(); renderClasses(); render(null);
 }
+// Una clase de ejemplo deja de serlo en cuanto el usuario le da un color propio
+const unmark = (c, i) => { c.name = c.name.replace(/\s*\(ejemplo\)/i, '') || 'Clase '+(i+1); };
 function renderClasses(){
   const box = $('clsList'); box.replaceChildren();
   classes.forEach((c, i) => {
     const el = h('div', {class:'cls'});
-    const sw = h('div', {class:'sw'}); sw.style.background = labToHex(...c.lab);
+    const sw = h('input', {type:'color', class:'sw', id:'cc'+i, 'aria-label':'Elegir color de '+c.name}); sw.value = labToHex(...c.lab);
     const n = h('input', {type:'text', id:'cn'+i, maxlength:'60', 'aria-label':'Nombre de la clase'}); n.value = c.name;
     const w = h('input', {type:'number', id:'cw'+i, step:'any', 'aria-label':'Valor de puntaje'}); w.value = c.w;
     const acts = h('div', {class:'row', style:'gap:4px;flex-wrap:nowrap'});
     const cap = h('button', {type:'button', class:'capbtn'}, 'Capturar'); cap.disabled = !running;
     const del = h('button', {type:'button', 'aria-label':'Eliminar clase '+c.name}, '✕');
     acts.append(cap, del);
-    const info = h('div', {class:'labv mono muted'}, `L* ${fmt(c.lab[0])} · a* ${fmt(c.lab[1])} · b* ${fmt(c.lab[2])} · valor ${c.w}`);
+    // L*, a*, b* editables a mano (p. ej. valores de un colorímetro de laboratorio)
+    const info = h('div', {class:'labv labin'});
+    [['L*',0,0,100],['a*',1,-128,128],['b*',2,-128,128]].forEach(([lbl,k,min,max]) => {
+      const lb = h('label', {class:'small muted'}, lbl+' ');
+      const x = h('input', {type:'number', id:`cl${k}_${i}`, step:'0.1', min, max, class:'mono'}); x.value = fmt(c.lab[k]);
+      x.addEventListener('change', () => { c.lab[k] = num(x.value, c.lab[k], min, max); unmark(c, i); classesChanged(); });
+      lb.appendChild(x); info.appendChild(lb);
+    });
     el.append(sw, n, w, acts, info); box.appendChild(el);
+    sw.addEventListener('change', () => { c.lab = hexToLab(sw.value); unmark(c, i); classesChanged(); });
     n.addEventListener('change', () => { c.name = str(n.value, 'Clase '+(i+1), 60); classesChanged(); });
     w.addEventListener('change', () => { c.w = num(w.value, 0, -1e6, 1e6); classesChanged(); });
     cap.addEventListener('click', async () => {
       const s = summarize(await averaged(10));
       if (!s){ setStatus('No hay píxeles válidos en el recuadro.', 'bad'); return; }
-      c.lab = [s.L, s.a, s.b]; c.name = c.name.replace(/\s*\(ejemplo\)/i, '') || 'Clase '+(i+1);
+      c.lab = [s.L, s.a, s.b]; unmark(c, i);
       classesChanged(); setStatus(`Clase “${c.name}” capturada.`, 'ok');
     });
     del.addEventListener('click', () => { classes.splice(i, 1); classesChanged(); });
   });
-  $('clsNote').textContent = classes.some(c => /ejemplo/i.test(c.name)) ? 'Las clases marcadas “ejemplo” son valores de muestra: reemplázalas capturando tus propios patrones.' : '';
+  $('clsNote').textContent = classes.some(c => /ejemplo/i.test(c.name)) ? 'Las clases marcadas “ejemplo” son valores de muestra: reemplázalas capturando tus propios patrones o escribiendo sus valores.' : '';
 }
 $('btnAddCls').addEventListener('click', () => {
   if (classes.length >= 20){ setStatus('Máximo 20 clases.', 'warn'); return; }

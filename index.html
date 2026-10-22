@@ -1,0 +1,587 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Colorímetro de Muestras</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: una columna tipo instrumento — visor arriba, lectura grande, luego paneles plegables */
+:root{
+  --bg:#eef1f0; --panel:#ffffff; --fg:#17201d; --muted:#5d6b66; --line:#d3dad7;
+  --accent:#0b7a6b; --accent-fg:#ffffff; --warn:#b4570b; --bad:#b3261e; --ok:#1d7a3a;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Consolas,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0f1513; --panel:#18201d; --fg:#e4ebe8; --muted:#93a39d; --line:#2b3632;
+  --accent:#3cc2ad; --accent-fg:#06211c; --warn:#f0a35a; --bad:#ff8a80; --ok:#6fd38c; color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font:15px/1.45 var(--sans);
+  padding:env(safe-area-inset-top,0) max(12px,env(safe-area-inset-right,0px)) 40px max(12px,env(safe-area-inset-left,0px))}
+.wrap{max-width:760px;margin:0 auto;display:flex;flex-direction:column;gap:12px;padding-top:12px}
+header{display:flex;align-items:baseline;justify-content:space-between;gap:8px;flex-wrap:wrap}
+h1{font-size:1.15rem;margin:0;font-weight:600;letter-spacing:.01em}
+h2{font-size:.78rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0;font-weight:600}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:10px}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.muted{color:var(--muted)}
+.small{font-size:.82rem}
+button,select,input{font:inherit;color:inherit}
+button{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 12px;cursor:pointer;min-height:40px}
+button.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent);font-weight:600}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button:disabled{opacity:.45;cursor:default}
+input[type=text],input[type=number],select{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-width:0}
+input[type=range]{width:100%;accent-color:var(--accent)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.row>*{flex:0 0 auto}
+.grow{flex:1 1 auto!important;min-width:0}
+
+/* Visor */
+.viewer{position:relative;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:4/3;max-width:100%}
+.viewer video{width:100%;height:100%;object-fit:cover;display:block}
+.roi{position:absolute;border:2px solid #fff;box-shadow:0 0 0 9999px rgba(0,0,0,.35);pointer-events:none;border-radius:4px}
+.viewer .msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;text-align:center;padding:20px;font-size:.95rem}
+.chips{position:absolute;left:8px;top:8px;display:flex;gap:4px;flex-wrap:wrap;max-width:calc(100% - 16px)}
+.chip{font:600 .7rem var(--mono);padding:2px 6px;border-radius:4px;background:rgba(0,0,0,.6);color:#fff}
+.chip.fixed{background:#0b7a6b}
+.chip.auto{background:#b4570b}
+
+/* Lectura */
+.readout{display:grid;grid-template-columns:auto 1fr;gap:14px;align-items:center}
+.score{font:600 3.4rem/1 var(--mono);font-variant-numeric:tabular-nums;min-width:3.2ch;text-align:right}
+.lab{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.lab div{display:flex;flex-direction:column}
+.lab b{font:600 1.05rem var(--mono)}
+.swatch{width:100%;height:28px;border-radius:6px;border:1px solid var(--line)}
+.distbar{display:flex;height:22px;border-radius:6px;overflow:hidden;border:1px solid var(--line)}
+.distbar span{height:100%}
+.legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:.82rem}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px;border:1px solid var(--line)}
+canvas.plot{width:100%;max-width:280px;aspect-ratio:1;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+
+/* Clases */
+.cls{display:grid;grid-template-columns:28px 1fr 74px auto;gap:6px;align-items:center}
+.cls .sw{width:28px;height:28px;border-radius:6px;border:1px solid var(--line)}
+.cls .labv{grid-column:2/-1;font-size:.76rem}
+
+/* Ajustes */
+.ctl{display:grid;grid-template-columns:1fr auto;gap:2px 8px}
+.ctl label{font-size:.88rem}
+.ctl output{font:.82rem var(--mono)}
+.ctl input{grid-column:1/-1}
+details>summary{cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center}
+details>summary::-webkit-details-marker{display:none}
+details>summary::after{content:"▸";color:var(--muted)}
+details[open]>summary::after{content:"▾"}
+.tbl{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font:.8rem var(--mono);font-variant-numeric:tabular-nums}
+th,td{padding:4px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
+.status{font-size:.82rem}
+.status.warn{color:var(--warn)} .status.bad{color:var(--bad)} .status.ok{color:var(--ok)}
+@media (max-width:480px){.score{font-size:2.6rem}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Colorímetro de Muestras</h1>
+    <span class="small muted" id="camInfo">Cámara detenida</span>
+  </header>
+
+  <div class="viewer" id="viewer">
+    <video id="video" playsinline muted></video>
+    <div class="roi" id="roi"></div>
+    <div class="chips" id="chips"></div>
+    <div class="msg" id="msg">Pulsa <b>&nbsp;Iniciar cámara&nbsp;</b> y apunta a la muestra dentro del recuadro.</div>
+  </div>
+
+  <div class="row">
+    <button class="primary" id="btnStart">Iniciar cámara</button>
+    <button id="btnLock" disabled>Fijar ajustes actuales</button>
+    <button id="btnTorch" disabled>Linterna</button>
+    <label class="small grow row" style="gap:6px">Recuadro
+      <input type="range" id="roiSize" min="10" max="90" value="40" class="grow" aria-label="Tamaño del recuadro">
+    </label>
+  </div>
+  <div class="status" id="status"></div>
+
+  <section class="panel">
+    <h2>Lectura en vivo</h2>
+    <div class="readout">
+      <div>
+        <div class="score" id="score">—</div>
+        <div class="small muted" style="text-align:right">puntaje</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px;min-width:0">
+        <div class="swatch" id="swatch"></div>
+        <div class="lab">
+          <div><span class="small muted">L*</span><b id="vL">—</b></div>
+          <div><span class="small muted">a*</span><b id="vA">—</b></div>
+          <div><span class="small muted">b*</span><b id="vB">—</b></div>
+          <div><span class="small muted">C*</span><b id="vC">—</b></div>
+          <div><span class="small muted">h°</span><b id="vH">—</b></div>
+          <div><span class="small muted">σL*</span><b id="vS">—</b></div>
+        </div>
+      </div>
+    </div>
+    <div class="distbar" id="distbar"></div>
+    <div class="legend" id="legend"></div>
+    <div class="small muted" id="pixInfo"></div>
+    <div class="row">
+      <input type="text" id="sampleName" class="grow" placeholder="Identificación de la muestra (lote, n°)">
+      <button class="primary" id="btnMeasure" disabled>Medir (promedio 10 cuadros)</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Distribución en el plano a*b*</h2>
+    <div class="row" style="align-items:flex-start;gap:14px">
+      <canvas class="plot" id="plot" width="400" height="400"></canvas>
+      <p class="small muted grow" style="margin:0;max-width:40ch">Cada punto es un píxel del recuadro. Los círculos con borde son los centros de las clases. Eje horizontal a* (verde → rojo), vertical b* (azul → amarillo), rango ±60.</p>
+    </div>
+  </section>
+
+  <details class="panel" id="clsPanel" open>
+    <summary><h2>Escala de puntaje (clases de color)</h2></summary>
+    <p class="small muted" style="margin:0">Cada píxel se asigna a la clase de color más cercana (ΔE*ab). El puntaje es el promedio ponderado de los valores de cada clase según su porcentaje. Para crear una clase, apunta a un patrón de referencia y pulsa <b>Capturar</b>.</p>
+    <div id="clsList" style="display:flex;flex-direction:column;gap:10px"></div>
+    <div class="row">
+      <button id="btnAddCls">Agregar clase</button>
+      <label class="small row" style="gap:6px">ΔE máx. para clasificar
+        <input type="number" id="maxDE" value="30" min="1" max="200" style="width:70px">
+      </label>
+    </div>
+    <div class="small muted" id="clsNote"></div>
+  </details>
+
+  <details class="panel" id="calPanel">
+    <summary><h2>Referencia de blanco</h2></summary>
+    <p class="small muted" style="margin:0">Opcional. Con los ajustes ya fijos, apunta a una tarjeta blanca o gris neutro bajo la misma luz y pulsa <b>Calibrar</b>. Se corrige la ganancia de cada canal para que esa referencia quede neutra.</p>
+    <div class="row">
+      <button id="btnWhite" disabled>Calibrar con blanco</button>
+      <button id="btnWhiteReset">Quitar calibración</button>
+      <span class="small mono" id="whiteInfo"></span>
+    </div>
+  </details>
+
+  <details class="panel" id="camPanel">
+    <summary><h2>Ajustes de cámara</h2></summary>
+    <p class="small muted" style="margin:0">Mueve un control para dejarlo en modo manual. <b>Fijar ajustes actuales</b> congela lo que eligió el modo automático. Guarda el preset para que todas las mediciones usen los mismos valores.</p>
+    <div id="ctlList" style="display:flex;flex-direction:column;gap:10px"></div>
+    <div class="row">
+      <button id="btnSavePreset" disabled>Guardar preset</button>
+      <button id="btnApplyPreset" disabled>Aplicar preset</button>
+      <button id="btnAuto" disabled>Volver a automático</button>
+    </div>
+    <div class="small mono muted" id="presetInfo"></div>
+  </details>
+
+  <details class="panel" id="logPanel" open>
+    <summary><h2>Registro de mediciones</h2></summary>
+    <div class="tbl"><table id="logTbl"></table></div>
+    <div class="row">
+      <button id="btnCsv">Exportar CSV</button>
+      <button id="btnClearLog">Borrar registro</button>
+    </div>
+  </details>
+</div>
+
+<script>
+(() => {
+'use strict';
+const $ = id => document.getElementById(id);
+const store = {
+  get(k, d){ try{ const v = localStorage.getItem('colorimetro.'+k); return v ? JSON.parse(v) : d; }catch{ return d; } },
+  set(k, v){ try{ localStorage.setItem('colorimetro.'+k, JSON.stringify(v)); }catch{} }
+};
+
+/* ---------- Color: sRGB -> CIELAB (D65) ---------- */
+const LIN = new Float32Array(256);
+for (let i=0;i<256;i++){ const c=i/255; LIN[i] = c<=0.04045 ? c/12.92 : Math.pow((c+0.055)/1.055,2.4); }
+const Xn=0.95047, Yn=1, Zn=1.08883, E=216/24389, K=24389/27;
+const f = t => t>E ? Math.cbrt(t) : (K*t+16)/116;
+function linToLab(r,g,b,out){
+  const X=(0.4124564*r+0.3575761*g+0.1804375*b)/Xn;
+  const Y=(0.2126729*r+0.7151522*g+0.0721750*b)/Yn;
+  const Z=(0.0193339*r+0.1191920*g+0.9503041*b)/Zn;
+  const fx=f(X), fy=f(Y), fz=f(Z);
+  out[0]=116*fy-16; out[1]=500*(fx-fy); out[2]=200*(fy-fz);
+}
+function labToHex(L,a,b){
+  const fy=(L+16)/116, fx=fy+a/500, fz=fy-b/200;
+  const inv = t => { const t3=t*t*t; return t3>E ? t3 : (116*t-16)/K; };
+  const X=inv(fx)*Xn, Y=(L>K*E ? fy*fy*fy : L/K)*Yn, Z=inv(fz)*Zn;
+  let r= 3.2404542*X-1.5371385*Y-0.4985314*Z;
+  let g=-0.9692660*X+1.8760108*Y+0.0415560*Z;
+  let bb=0.0556434*X-0.2040259*Y+1.0572252*Z;
+  const enc = c => { c=Math.min(1,Math.max(0,c)); return Math.round(255*(c<=0.0031308?12.92*c:1.055*Math.pow(c,1/2.4)-0.055)); };
+  return '#'+[r,g,bb].map(c=>enc(c).toString(16).padStart(2,'0')).join('');
+}
+
+/* ---------- Estado ---------- */
+const PALETTE_FALLBACK = ['#999'];
+let classes = store.get('classes', null) || [
+  {name:'Claro (ejemplo)',  w:0,   lab:[72,6,32]},
+  {name:'Medio (ejemplo)',  w:50,  lab:[52,14,34]},
+  {name:'Oscuro (ejemplo)', w:100, lab:[32,12,18]},
+];
+let white = store.get('white', null);      // ganancias [gr,gg,gb] en lineal
+let log = store.get('log', []);
+let stream=null, track=null, caps={}, torchOn=false, running=false, busy=false;
+const video=$('video');
+const work=document.createElement('canvas'); const wctx=work.getContext('2d',{willReadFrequently:true});
+
+/* ---------- Análisis del recuadro ---------- */
+function roiRect(w,h){
+  const pct=+$('roiSize').value/100, s=Math.min(w,h)*pct;
+  return {x:Math.round((w-s)/2), y:Math.round((h-s)/2), s:Math.round(s)};
+}
+function placeRoi(){
+  const v=$('viewer').getBoundingClientRect(), pct=+$('roiSize').value/100;
+  // El video se muestra con object-fit:cover; el recuadro se dibuja centrado sobre la parte visible.
+  const s=Math.min(v.width,v.height)*pct, el=$('roi');
+  el.style.width=el.style.height=s+'px'; el.style.left=(v.width-s)/2+'px'; el.style.top=(v.height-s)/2+'px';
+}
+function analyzeFrame(){
+  const vw=video.videoWidth, vh=video.videoHeight; if(!vw) return null;
+  // Escalar para que el recuadro tenga como máximo ~160 px de lado
+  const r=roiRect(vw,vh), scale=Math.min(1,160/r.s), s=Math.max(4,Math.round(r.s*scale));
+  work.width=s; work.height=s;
+  wctx.drawImage(video,r.x,r.y,r.s,r.s,0,0,s,s);
+  const d=wctx.getImageData(0,0,s,s).data;
+  const g=white||[1,1,1], lab=[0,0,0], maxDE=+$('maxDE').value||30, maxDE2=maxDE*maxDE;
+  const counts=new Array(classes.length).fill(0);
+  let n=0, clipped=0, unclass=0, sL=0,sA=0,sB=0,sLL=0;
+  const pts=[]; const step=Math.max(1,Math.floor((s*s)/1500));
+  for(let i=0,p=0;i<d.length;i+=4,p++){
+    const R=d[i],G=d[i+1],B=d[i+2];
+    if(R>=250||G>=250||B>=250||(R<4&&G<4&&B<4)){clipped++;continue;}
+    linToLab(Math.min(1,LIN[R]*g[0]),Math.min(1,LIN[G]*g[1]),Math.min(1,LIN[B]*g[2]),lab);
+    n++; sL+=lab[0]; sA+=lab[1]; sB+=lab[2]; sLL+=lab[0]*lab[0];
+    if(p%step===0) pts.push(lab[1],lab[2],R,G,B);
+    let best=-1,bd=Infinity;
+    for(let c=0;c<classes.length;c++){
+      const q=classes[c].lab; const dl=lab[0]-q[0],da=lab[1]-q[1],db=lab[2]-q[2];
+      const dd=dl*dl+da*da+db*db; if(dd<bd){bd=dd;best=c;}
+    }
+    if(best>=0&&bd<=maxDE2) counts[best]++; else unclass++;
+  }
+  return {n,clipped,unclass,counts,sL,sA,sB,sLL,pts,total:s*s};
+}
+function summarize(acc){
+  if(!acc||!acc.n) return null;
+  const L=acc.sL/acc.n, a=acc.sA/acc.n, b=acc.sB/acc.n;
+  const sd=Math.sqrt(Math.max(0,acc.sLL/acc.n-L*L));
+  const C=Math.hypot(a,b); let h=Math.atan2(b,a)*180/Math.PI; if(h<0)h+=360;
+  const classified=acc.counts.reduce((x,y)=>x+y,0);
+  const pct=acc.counts.map(c=>classified?c/classified*100:0);
+  let score=null;
+  if(classified>0) score=acc.counts.reduce((s,c,i)=>s+c*classes[i].w,0)/classified;
+  return {L,a,b,C,h,sd,pct,score,classified,n:acc.n,clipped:acc.clipped,unclass:acc.unclass,total:acc.total};
+}
+function mergeAcc(A,B){
+  if(!A) return {...B,counts:B.counts.slice()};
+  ['n','clipped','unclass','sL','sA','sB','sLL','total'].forEach(k=>A[k]+=B[k]);
+  B.counts.forEach((c,i)=>A.counts[i]+=c); A.pts=B.pts; return A;
+}
+
+/* ---------- Render ---------- */
+const fmt=(v,d=1)=>v==null||isNaN(v)?'—':v.toFixed(d);
+function render(sum, pts){
+  $('score').textContent = sum&&sum.score!=null ? Math.round(sum.score) : '—';
+  $('vL').textContent=fmt(sum?.L); $('vA').textContent=fmt(sum?.a); $('vB').textContent=fmt(sum?.b);
+  $('vC').textContent=fmt(sum?.C); $('vH').textContent=fmt(sum?.h,0); $('vS').textContent=fmt(sum?.sd);
+  $('swatch').style.background = sum ? labToHex(sum.L,sum.a,sum.b) : 'transparent';
+  const bar=$('distbar'), leg=$('legend'); bar.innerHTML=''; leg.innerHTML='';
+  classes.forEach((c,i)=>{
+    const p=sum?sum.pct[i]:0, col=labToHex(...c.lab);
+    const s=document.createElement('span'); s.style.width=p+'%'; s.style.background=col; s.title=c.name; bar.appendChild(s);
+    const l=document.createElement('span'); l.innerHTML=`<i style="background:${col}"></i>`;
+    l.appendChild(document.createTextNode(`${c.name} · ${fmt(p,0)}% (valor ${c.w})`)); leg.appendChild(l);
+  });
+  if(sum){
+    const unPct=sum.unclass/sum.n*100, clipPct=sum.clipped/sum.total*100;
+    $('pixInfo').textContent=`${sum.n} píxeles válidos · ${fmt(unPct,0)}% fuera de clase · ${fmt(clipPct,0)}% saturados u oscuros (excluidos)`;
+    $('pixInfo').className = 'small ' + (clipPct>10||unPct>25 ? 'status warn' : 'muted');
+  } else $('pixInfo').textContent='';
+  drawPlot(pts);
+}
+function drawPlot(pts){
+  const cv=$('plot'), ctx=cv.getContext('2d'), W=cv.width, R=60;
+  const css=getComputedStyle(document.body);
+  ctx.clearRect(0,0,W,W);
+  const X=a=>W/2+a/R*(W/2), Y=b=>W/2-b/R*(W/2);
+  ctx.strokeStyle=css.getPropertyValue('--line'); ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(0,W/2); ctx.lineTo(W,W/2); ctx.moveTo(W/2,0); ctx.lineTo(W/2,W); ctx.stroke();
+  [20,40].forEach(r=>{ctx.beginPath();ctx.arc(W/2,W/2,r/R*W/2,0,7);ctx.stroke();});
+  ctx.fillStyle=css.getPropertyValue('--muted'); ctx.font='18px IBM Plex Mono, monospace';
+  ctx.fillText('+a*',W-44,W/2-6); ctx.fillText('+b*',W/2+6,20);
+  if(pts) for(let i=0;i<pts.length;i+=5){
+    ctx.fillStyle=`rgb(${pts[i+2]},${pts[i+3]},${pts[i+4]})`;
+    ctx.fillRect(X(pts[i])-2,Y(pts[i+1])-2,4,4);
+  }
+  classes.forEach(c=>{
+    ctx.beginPath(); ctx.arc(X(c.lab[1]),Y(c.lab[2]),9,0,7);
+    ctx.fillStyle=labToHex(...c.lab); ctx.fill();
+    ctx.lineWidth=2.5; ctx.strokeStyle=css.getPropertyValue('--fg'); ctx.stroke();
+  });
+}
+
+/* ---------- Bucle en vivo ---------- */
+let lastSum=null;
+function loop(){
+  if(!running) return;
+  if(!busy){ const acc=analyzeFrame(); lastSum=summarize(acc); render(lastSum, acc?.pts); }
+  setTimeout(()=>requestAnimationFrame(loop),180);
+}
+const nextFrame=()=>new Promise(r=>video.requestVideoFrameCallback?video.requestVideoFrameCallback(()=>r()):setTimeout(r,60));
+async function averaged(frames){
+  busy=true; let acc=null;
+  try{ for(let i=0;i<frames;i++){ await nextFrame(); const a=analyzeFrame(); if(a) acc=mergeAcc(acc,a); } }
+  finally{ busy=false; }
+  return acc;
+}
+
+/* ---------- Cámara ---------- */
+const CTLS=[
+  {key:'exposureTime', mode:'exposureMode', label:'Tiempo de exposición', fmt:v=>`${(v/10).toFixed(1)} ms`},
+  {key:'iso', label:'ISO', fmt:v=>Math.round(v)},
+  {key:'colorTemperature', mode:'whiteBalanceMode', label:'Balance de blancos', fmt:v=>`${Math.round(v)} K`},
+  {key:'focusDistance', mode:'focusMode', label:'Distancia de foco', fmt:v=>`${(+v).toFixed(2)} m`},
+  {key:'exposureCompensation', label:'Compensación de exposición', fmt:v=>`${(+v).toFixed(1)} EV`},
+  {key:'zoom', label:'Zoom', fmt:v=>`${(+v).toFixed(1)}×`},
+  {key:'brightness', label:'Brillo', fmt:v=>(+v).toFixed(0)},
+  {key:'contrast', label:'Contraste', fmt:v=>(+v).toFixed(0)},
+  {key:'saturation', label:'Saturación', fmt:v=>(+v).toFixed(0)},
+  {key:'sharpness', label:'Nitidez', fmt:v=>(+v).toFixed(0)},
+];
+const MODES=['exposureMode','whiteBalanceMode','focusMode'];
+function setStatus(t,cls=''){ const s=$('status'); s.textContent=t; s.className='status '+cls; }
+
+async function apply(c){
+  try{ await track.applyConstraints({advanced:[c]}); return true; }
+  catch(e){ setStatus('El equipo rechazó el ajuste: '+(e.message||e.name),'bad'); return false; }
+}
+function settings(){ return track?.getSettings?.()||{}; }
+
+function buildControls(){
+  const list=$('ctlList'); list.innerHTML='';
+  const st=settings(); let any=false;
+  CTLS.forEach(ct=>{
+    const cp=caps[ct.key]; if(!cp||cp.max==null||cp.min===cp.max) return; any=true;
+    const box=document.createElement('div'); box.className='ctl';
+    const id='ctl_'+ct.key;
+    box.innerHTML=`<label for="${id}">${ct.label}</label><output id="${id}_o"></output>
+      <input type="range" id="${id}" min="${cp.min}" max="${cp.max}" step="${cp.step||((cp.max-cp.min)/100)}">`;
+    list.appendChild(box);
+    const inp=box.querySelector('input'), out=box.querySelector('output');
+    inp.value=st[ct.key]??cp.min; out.textContent=ct.fmt(+inp.value);
+    inp.addEventListener('input',()=>{ out.textContent=ct.fmt(+inp.value); });
+    inp.addEventListener('change',async()=>{
+      const c={[ct.key]:+inp.value};
+      if(ct.mode && caps[ct.mode]?.includes('manual')) c[ct.mode]='manual';
+      if(ct.key==='iso' && caps.exposureMode?.includes('manual')) c.exposureMode='manual';
+      if(await apply(c)) setStatus(`${ct.label} fijado en ${ct.fmt(+inp.value)}`,'ok');
+      refreshChips();
+    });
+  });
+  if(!any) list.innerHTML='<p class="small status warn" style="margin:0">Este navegador o cámara no expone controles manuales. Usa Chrome en Android; Safari en iPhone no permite fijar exposición ni balance de blancos desde una página web.</p>';
+}
+function refreshUiValues(){
+  const st=settings();
+  CTLS.forEach(ct=>{ const i=$('ctl_'+ct.key); if(i&&st[ct.key]!=null){ i.value=st[ct.key]; $('ctl_'+ct.key+'_o').textContent=ct.fmt(+st[ct.key]); }});
+}
+function refreshChips(){
+  const st=settings(), box=$('chips'); box.innerHTML='';
+  const add=(t,k)=>{const s=document.createElement('span'); s.className='chip '+k; s.textContent=t; box.appendChild(s);};
+  [['exposureMode','EXP'],['whiteBalanceMode','WB'],['focusMode','FOCO']].forEach(([m,l])=>{
+    if(!caps[m]) { add(l+' n/d',''); return; }
+    const v=st[m]; add(`${l} ${v==='manual'?'fijo':v==='none'?'—':'auto'}`, v==='manual'?'fixed':'auto');
+  });
+  refreshUiValues();
+}
+
+async function lockCurrent(){
+  const st=settings(); const c={};
+  if(caps.exposureMode?.includes('manual')){ c.exposureMode='manual'; if(st.exposureTime!=null&&caps.exposureTime) c.exposureTime=st.exposureTime; if(st.iso!=null&&caps.iso) c.iso=st.iso; }
+  if(caps.whiteBalanceMode?.includes('manual')){ c.whiteBalanceMode='manual'; if(st.colorTemperature!=null&&caps.colorTemperature) c.colorTemperature=st.colorTemperature; }
+  if(caps.focusMode?.includes('manual')){ c.focusMode='manual'; if(st.focusDistance!=null&&caps.focusDistance) c.focusDistance=st.focusDistance; }
+  if(!Object.keys(c).length){ setStatus('Esta cámara no admite modo manual desde el navegador.','bad'); return; }
+  if(await apply(c)){
+    const miss=MODES.filter(m=>!caps[m]?.includes('manual')).map(m=>({exposureMode:'exposición',whiteBalanceMode:'balance de blancos',focusMode:'foco'}[m]));
+    setStatus('Ajustes fijados.'+(miss.length?' No se pudo fijar: '+miss.join(', ')+'.':''), miss.length?'warn':'ok');
+  }
+  refreshChips();
+}
+function currentPreset(){
+  const st=settings(), p={};
+  MODES.forEach(m=>{ if(st[m]) p[m]=st[m]; });
+  CTLS.forEach(ct=>{ if(caps[ct.key]&&st[ct.key]!=null) p[ct.key]=st[ct.key]; });
+  return p;
+}
+async function applyPreset(p){
+  const c={};
+  Object.entries(p).forEach(([k,v])=>{
+    if(MODES.includes(k)){ if(caps[k]?.includes(v)) c[k]=v; }
+    else if(caps[k]) c[k]=Math.min(caps[k].max,Math.max(caps[k].min,v));
+  });
+  if(await apply(c)) setStatus('Preset aplicado.','ok');
+  refreshChips();
+}
+function showPreset(){
+  const p=store.get('preset',null);
+  $('presetInfo').textContent = p ? 'Preset guardado: '+Object.entries(p).map(([k,v])=>`${k}=${typeof v==='number'?+v.toFixed(3):v}`).join(' · ') : 'Sin preset guardado.';
+}
+
+async function start(){
+  if(!navigator.mediaDevices?.getUserMedia){ setStatus('Este navegador no permite usar la cámara. La página debe abrirse por https:// en Chrome.','bad'); return; }
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:960}}});
+  }catch(e){ setStatus('No se pudo abrir la cámara: '+(e.message||e.name),'bad'); return; }
+  track=stream.getVideoTracks()[0];
+  video.srcObject=stream; await video.play();
+  // Algunos equipos sólo informan capacidades después de un instante
+  await new Promise(r=>setTimeout(r,500));
+  caps=track.getCapabilities?.()||{};
+  $('msg').hidden=true; running=true;
+  $('camInfo').textContent=`${track.label||'Cámara'} · ${video.videoWidth}×${video.videoHeight}`;
+  ['btnLock','btnMeasure','btnWhite','btnSavePreset','btnApplyPreset','btnAuto'].forEach(id=>$(id).disabled=false);
+  $('btnTorch').disabled=!caps.torch;
+  $('btnStart').textContent='Detener cámara';
+  buildControls(); placeRoi();
+  const p=store.get('preset',null);
+  if(p){ await applyPreset(p); setStatus('Preset guardado aplicado automáticamente.','ok'); }
+  else setStatus('Cámara en modo automático. Encuadra la muestra y pulsa “Fijar ajustes actuales”.','warn');
+  refreshChips(); loop();
+}
+function stop(){
+  running=false; stream?.getTracks().forEach(t=>t.stop()); stream=track=null; caps={};
+  $('msg').hidden=false; $('btnStart').textContent='Iniciar cámara'; $('camInfo').textContent='Cámara detenida'; $('chips').innerHTML='';
+  ['btnLock','btnMeasure','btnWhite','btnSavePreset','btnApplyPreset','btnAuto','btnTorch'].forEach(id=>$(id).disabled=true);
+}
+
+/* ---------- Clases ---------- */
+function saveClasses(){ store.set('classes',classes); }
+function renderClasses(){
+  const box=$('clsList'); box.innerHTML='';
+  classes.forEach((c,i)=>{
+    const el=document.createElement('div'); el.className='cls';
+    el.innerHTML=`<div class="sw" style="background:${labToHex(...c.lab)}"></div>
+      <input type="text" id="cn${i}" aria-label="Nombre de la clase">
+      <input type="number" id="cw${i}" aria-label="Valor de puntaje" step="any">
+      <div class="row" style="gap:4px;flex-wrap:nowrap"><button data-cap="${i}" ${running?'':'disabled'}>Capturar</button><button data-del="${i}" aria-label="Eliminar clase">✕</button></div>
+      <div class="labv mono muted">L* ${fmt(c.lab[0])} · a* ${fmt(c.lab[1])} · b* ${fmt(c.lab[2])} · valor ${c.w}</div>`;
+    box.appendChild(el);
+    const n=el.querySelector('#cn'+i), w=el.querySelector('#cw'+i);
+    n.value=c.name; w.value=c.w;
+    n.addEventListener('change',()=>{c.name=n.value||'Clase '+(i+1); saveClasses(); renderClasses();});
+    w.addEventListener('change',()=>{c.w=+w.value||0; saveClasses(); renderClasses();});
+  });
+  const ex=classes.some(c=>/ejemplo/i.test(c.name));
+  $('clsNote').textContent = ex ? 'Las clases marcadas “ejemplo” son valores de muestra: reemplázalas capturando tus propios patrones.' : '';
+  render(lastSum);
+}
+$('clsList').addEventListener('click',async e=>{
+  const cap=e.target.dataset.cap, del=e.target.dataset.del;
+  if(cap!=null){
+    const s=summarize(await averaged(10)); if(!s){setStatus('No hay píxeles válidos en el recuadro.','bad');return;}
+    classes[cap].lab=[s.L,s.a,s.b]; classes[cap].name=classes[cap].name.replace(/\s*\(ejemplo\)/i,'');
+    saveClasses(); renderClasses(); setStatus(`Clase “${classes[cap].name}” capturada.`,'ok');
+  }
+  if(del!=null){ classes.splice(+del,1); saveClasses(); renderClasses(); }
+});
+$('btnAddCls').addEventListener('click',()=>{
+  const base=lastSum?[lastSum.L,lastSum.a,lastSum.b]:[50,0,0];
+  classes.push({name:'Clase '+(classes.length+1), w:classes.length?Math.max(...classes.map(c=>c.w))+10:0, lab:base});
+  saveClasses(); renderClasses();
+});
+$('maxDE').value=store.get('maxDE',30);
+$('maxDE').addEventListener('change',()=>store.set('maxDE',+$('maxDE').value));
+
+/* ---------- Blanco ---------- */
+function showWhite(){ $('whiteInfo').textContent = white ? `ganancias R ${white[0].toFixed(3)} · G ${white[1].toFixed(3)} · B ${white[2].toFixed(3)}` : 'sin calibrar'; }
+$('btnWhite').addEventListener('click',async()=>{
+  busy=true;
+  try{
+    let r=0,g=0,b=0,n=0;
+    for(let k=0;k<10;k++){
+      await nextFrame();
+      const vw=video.videoWidth,vh=video.videoHeight,R=roiRect(vw,vh),s=Math.min(120,R.s);
+      work.width=work.height=s; wctx.drawImage(video,R.x,R.y,R.s,R.s,0,0,s,s);
+      const d=wctx.getImageData(0,0,s,s).data;
+      for(let i=0;i<d.length;i+=4){ if(d[i]>=250||d[i+1]>=250||d[i+2]>=250) continue; r+=LIN[d[i]];g+=LIN[d[i+1]];b+=LIN[d[i+2]];n++; }
+    }
+    if(n<100){ setStatus('El blanco está saturado. Baja la exposición e intenta de nuevo.','bad'); return; }
+    r/=n; g/=n; b/=n;
+    // Llevar la referencia a un gris neutro con la misma luminancia Y
+    const Y=0.2126729*r+0.7151522*g+0.0721750*b;
+    white=[Y/r,Y/g,Y/b]; store.set('white',white); showWhite(); setStatus('Referencia de blanco calibrada.','ok');
+  } finally { busy=false; }
+});
+$('btnWhiteReset').addEventListener('click',()=>{ white=null; store.set('white',null); showWhite(); });
+
+/* ---------- Registro ---------- */
+function renderLog(){
+  const t=$('logTbl');
+  const names=[...new Set(log.flatMap(r=>Object.keys(r.pct)))];
+  t.innerHTML=`<tr><th>Hora</th><th>Muestra</th><th>Puntaje</th><th>L*</th><th>a*</th><th>b*</th><th>C*</th><th>h°</th>${names.map(n=>`<th>% ${esc(n)}</th>`).join('')}</tr>`+
+    (log.length? log.slice().reverse().map(r=>`<tr><td>${esc(r.t.slice(11,19))}</td><td>${esc(r.name)}</td><td><b>${fmt(r.score,0)}</b></td><td>${fmt(r.L)}</td><td>${fmt(r.a)}</td><td>${fmt(r.b)}</td><td>${fmt(r.C)}</td><td>${fmt(r.h,0)}</td>${names.map(n=>`<td>${r.pct[n]!=null?fmt(r.pct[n],0):''}</td>`).join('')}</tr>`).join('')
+    : `<tr><td colspan="8" class="muted" style="text-align:left">Sin mediciones todavía. Pulsa “Medir” con una muestra en el recuadro.</td></tr>`);
+}
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+$('btnMeasure').addEventListener('click',async()=>{
+  $('btnMeasure').disabled=true;
+  try{
+    const s=summarize(await averaged(10));
+    if(!s){ setStatus('No hay píxeles válidos en el recuadro.','bad'); return; }
+    const pct={}; classes.forEach((c,i)=>pct[c.name]=s.pct[i]);
+    log.push({t:new Date().toISOString(), name:$('sampleName').value||'—', score:s.score, L:s.L,a:s.a,b:s.b,C:s.C,h:s.h,sd:s.sd,pct, preset:currentPreset()});
+    store.set('log',log); renderLog(); render(s);
+    setStatus(`Medido: puntaje ${fmt(s.score,0)}`, 'ok');
+    const mode=settings();
+    if(mode.exposureMode!=='manual'||mode.whiteBalanceMode!=='manual') setStatus(`Medido: puntaje ${fmt(s.score,0)} — atención: la cámara no estaba con exposición y balance fijos.`,'warn');
+  } finally { $('btnMeasure').disabled=false; }
+});
+$('btnClearLog').addEventListener('click',function(){
+  if(this.dataset.armed){ log=[]; store.set('log',log); renderLog(); this.textContent='Borrar registro'; delete this.dataset.armed; }
+  else { this.dataset.armed='1'; this.textContent='Confirmar borrado'; setTimeout(()=>{this.textContent='Borrar registro';delete this.dataset.armed;},4000); }
+});
+$('btnCsv').addEventListener('click',()=>{
+  if(!log.length){ setStatus('No hay mediciones para exportar.','warn'); return; }
+  const names=[...new Set(log.flatMap(r=>Object.keys(r.pct)))];
+  const head=['fecha_hora','muestra','puntaje','L','a','b','C','h','sdL',...names.map(n=>'pct_'+n),'ajustes_camara'];
+  const q=v=>{ v=v==null?'':String(v); return /[;"\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v; };
+  const num=v=>v==null?'':(+v).toFixed(2).replace('.',',');
+  const rows=log.map(r=>[r.t,r.name,num(r.score),num(r.L),num(r.a),num(r.b),num(r.C),num(r.h),num(r.sd),...names.map(n=>num(r.pct[n])),JSON.stringify(r.preset||{})].map(q).join(';'));
+  const blob=new Blob(['﻿'+head.map(q).join(';')+'\n'+rows.join('\n')],{type:'text/csv'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='colorimetro_'+new Date().toISOString().slice(0,10)+'.csv';
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+});
+
+/* ---------- Botones de cámara ---------- */
+$('btnStart').addEventListener('click',()=>running?stop():start());
+$('btnLock').addEventListener('click',lockCurrent);
+$('btnTorch').addEventListener('click',async()=>{ torchOn=!torchOn; await apply({torch:torchOn}); $('btnTorch').textContent=torchOn?'Apagar linterna':'Linterna'; });
+$('btnSavePreset').addEventListener('click',()=>{ store.set('preset',currentPreset()); showPreset(); setStatus('Preset guardado. Se aplicará cada vez que inicies la cámara.','ok'); });
+$('btnApplyPreset').addEventListener('click',()=>{ const p=store.get('preset',null); p?applyPreset(p):setStatus('No hay preset guardado.','warn'); });
+$('btnAuto').addEventListener('click',async()=>{
+  const c={}; MODES.forEach(m=>{ if(caps[m]?.includes('continuous')) c[m]='continuous'; });
+  await apply(c); refreshChips(); setStatus('Cámara en automático.','warn');
+});
+$('roiSize').value=store.get('roi',40);
+$('roiSize').addEventListener('input',()=>{ placeRoi(); store.set('roi',+$('roiSize').value); });
+addEventListener('resize',placeRoi);
+document.addEventListener('visibilitychange',()=>{ if(document.hidden&&running) stop(); });
+
+renderClasses(); renderLog(); showWhite(); showPreset(); placeRoi(); render(null);
+})();
+</script>
+</body>
+</html>

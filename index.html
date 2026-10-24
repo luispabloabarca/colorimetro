@@ -75,11 +75,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 /* Visor */
 .viewer{position:relative;background:#000;border-radius:8px;overflow:hidden;aspect-ratio:4/3;max-width:100%}
 .viewer video{width:100%;height:100%;object-fit:cover;display:block}
-.roi{position:absolute;border:2px solid #fff;box-shadow:0 0 0 9999px rgba(0,0,0,.35);pointer-events:none;border-radius:4px;overflow:hidden}
-.roi canvas{position:absolute;inset:0;width:100%;height:100%}
-.key{display:inline-block;width:10px;height:10px;border-radius:2px;margin:0 4px 0 10px;vertical-align:-1px}
-.key:first-child{margin-left:0}
-.bgsw{width:28px;height:28px;border-radius:6px;border:1px solid var(--line);flex:0 0 auto}
+.roi{position:absolute;border:2px solid #fff;box-shadow:0 0 0 9999px rgba(0,0,0,.35);pointer-events:none;border-radius:4px}
 .viewer .msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;text-align:center;padding:20px;font-size:.95rem}
 .chips{position:absolute;left:8px;top:8px;display:flex;gap:4px;flex-wrap:wrap;max-width:calc(100% - 16px)}
 .chip{font:600 .7rem var(--mono);padding:2px 6px;border-radius:4px;background:rgba(0,0,0,.6);color:#fff}
@@ -153,48 +149,21 @@ th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
       <div class="bb">
         <div class="viewer" id="viewer">
           <video id="video" playsinline muted></video>
-          <div class="roi" id="roi"><canvas id="roiMask" hidden></canvas></div>
+          <div class="roi" id="roi"></div>
           <div class="chips" id="chips"></div>
           <div class="msg" id="msg">Pulsa “Iniciar cámara” y apunta a la muestra dentro del recuadro.</div>
         </div>
         <div class="row">
           <button id="btnLock" type="button" disabled>Fijar ajustes actuales</button>
           <button id="btnTorch" type="button" disabled>Linterna</button>
-          <label class="small grow row" style="gap:6px">Tamaño
+          <select id="roiShape" aria-label="Forma del recuadro">
+            <option value="square">Cuadrado</option>
+            <option value="round">Redondo</option>
+          </select>
+          <label class="small grow row" style="gap:6px">Recuadro
             <input type="range" id="roiSize" min="10" max="90" value="40" class="grow" aria-label="Tamaño del recuadro">
           </label>
         </div>
-      </div>
-    </section>
-
-    <section class="panel block" data-block="roi" data-title="Zona de medición">
-      <div class="bb">
-        <div class="row">
-          <label class="small row" style="gap:6px" for="roiShape">Forma
-            <select id="roiShape">
-              <option value="ellipse">Círculo / elipse</option>
-              <option value="rect">Rectángulo</option>
-            </select>
-          </label>
-        </div>
-        <div class="ctl">
-          <label for="roiAspect">Proporción ancho : alto</label><output id="roiAspectO" class="mono"></output>
-          <input type="range" id="roiAspect" min="-2.32" max="2.32" step="0.02" value="0">
-        </div>
-        <div class="row"><button id="btnAspect1" type="button">Volver a 1 : 1</button>
-          <span class="small muted grow">Círculo 1 : 1 para galletas; rectángulo alargado para ramitas o barras. El tamaño se ajusta en el visor.</span></div>
-        <p class="small muted">Fondo: deja la bandeja vacía dentro de la zona y pulsa <b>Capturar fondo</b>. Lo que se parezca al fondo no se cuenta, así se mide solo el producto aunque no llene la zona. Funciona mejor con un fondo de color muy distinto al producto, como azul o negro mate.</p>
-        <div class="row">
-          <span class="bgsw" id="bgSwatch"></span>
-          <button id="btnBg" type="button" disabled>Capturar fondo</button>
-          <button id="btnBgReset" type="button">Quitar fondo</button>
-          <label class="small row" style="gap:6px">ΔE fondo
-            <input type="number" id="bgDE" value="15" min="1" max="100" style="width:70px">
-          </label>
-        </div>
-        <div class="small mono muted" id="bgInfo"></div>
-        <label class="small row" style="gap:6px"><input type="checkbox" id="showMask"> Marcar en la imagen lo que no se cuenta</label>
-        <div class="small muted"><span class="key" style="background:rgb(40,120,255)"></span>fondo<span class="key" style="background:rgb(255,40,40)"></span>saturado u oscuro<span class="key" style="background:rgb(255,200,0)"></span>fuera de clase</div>
       </div>
     </section>
 
@@ -265,7 +234,6 @@ th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
       <div class="bb">
         <p class="small muted">Mueve un control para dejarlo en modo manual. <b>Fijar ajustes actuales</b> congela lo que eligió el modo automático. Guarda el preset para que todas las mediciones usen los mismos valores.</p>
         <div id="ctlList" style="display:flex;flex-direction:column;gap:10px"><p class="small muted">Inicia la cámara para ver los controles disponibles.</p></div>
-        <label class="small row" style="gap:6px"><input type="checkbox" id="autoLock" checked> Si no hay preset, fijar en manual 2 s después de iniciar la cámara</label>
         <div class="row">
           <button id="btnSavePreset" type="button" disabled>Guardar preset</button>
           <button id="btnApplyPreset" type="button" disabled>Aplicar preset</button>

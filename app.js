@@ -20,7 +20,7 @@ const isObj = v => v && typeof v === 'object' && !Array.isArray(v);
 
 const CTLS = [
   {key:'exposureTime', mode:'exposureMode', label:'Tiempo de exposición', fmt:v=>`${(v/10).toFixed(1)} ms`},
-  {key:'iso', label:'ISO', fmt:v=>Math.round(v)},
+  {key:'iso', mode:'exposureMode', label:'ISO', fmt:v=>Math.round(v)},
   {key:'colorTemperature', mode:'whiteBalanceMode', label:'Balance de blancos', fmt:v=>`${Math.round(v)} K`},
   {key:'focusDistance', mode:'focusMode', label:'Distancia de foco', fmt:v=>`${(+v).toFixed(2)} m`},
   {key:'exposureCompensation', label:'Compensación de exposición', fmt:v=>`${(+v).toFixed(1)} EV`},
@@ -284,7 +284,6 @@ function buildControls(){
     inp.addEventListener('change', async () => {
       const c = {[ct.key]: +inp.value};
       if (ct.mode && caps[ct.mode]?.includes('manual')) c[ct.mode] = 'manual';
-      if (ct.key==='iso' && caps.exposureMode?.includes('manual')) c.exposureMode = 'manual';
       if (await apply(c)) setStatus(`${ct.label} fijado en ${ct.fmt(+inp.value)}`, 'ok');
       refreshChips();
     });
@@ -303,33 +302,71 @@ function refreshChips(){
     if (i && st[ct.key]!=null){ i.value = st[ct.key]; $('ctl_'+ct.key+'_o').textContent = ct.fmt(+st[ct.key]); }
   });
 }
-async function lockCurrent(){
-  const st = settings(), c = {};
-  if (caps.exposureMode?.includes('manual')){ c.exposureMode='manual'; if (st.exposureTime!=null&&caps.exposureTime) c.exposureTime=st.exposureTime; if (st.iso!=null&&caps.iso) c.iso=st.iso; }
-  if (caps.whiteBalanceMode?.includes('manual')){ c.whiteBalanceMode='manual'; if (st.colorTemperature!=null&&caps.colorTemperature) c.colorTemperature=st.colorTemperature; }
-  if (caps.focusMode?.includes('manual')){ c.focusMode='manual'; if (st.focusDistance!=null&&caps.focusDistance) c.focusDistance=st.focusDistance; }
-  if (!Object.keys(c).length){ setStatus('Esta cámara no admite modo manual desde el navegador.', 'bad'); return; }
-  if (await apply(c)){
-    const miss = MODES.filter(m => !caps[m]?.includes('manual')).map(m => ({exposureMode:'exposición', whiteBalanceMode:'balance de blancos', focusMode:'foco'}[m]));
-    setStatus('Ajustes fijados.'+(miss.length ? ' No se pudo fijar: '+miss.join(', ')+'.' : ''), miss.length ? 'warn' : 'ok');
+/* Chrome descarta en silencio un bloque "advanced" completo si el equipo no acepta uno solo de sus
+   valores. Por eso cada ajuste se aplica por separado y se verifica leyendo getSettings(). */
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const LABEL_OF = {exposureMode:'modo de exposición', whiteBalanceMode:'modo de balance de blancos', focusMode:'modo de foco',
+  ...Object.fromEntries(CTLS.map(c => [c.key, c.label.toLowerCase()]))};
+async function applyOne(c){
+  if (!track) return false;
+  try{ await track.applyConstraints({advanced:[c]}); }catch{ return false; }
+  await wait(120);
+  return true;
+}
+function near(key, want, got){
+  if (got==null) return false;
+  const tol = Math.max(caps[key]?.step || 0, Math.abs(want)*0.03, 1e-6);
+  return Math.abs(got-want) <= tol;
+}
+// Aplica un set de ajustes y devuelve los que la cámara no aceptó
+async function applyPreset(p){
+  const failed = [];
+  for (const m of MODES){
+    if (!p[m]) continue;
+    if (!caps[m]?.includes(p[m])){ if (p[m]==='manual') failed.push(m); continue; }
+    await applyOne({[m]:p[m]});
+    if (settings()[m]!==p[m]) failed.push(m);
+  }
+  for (const ct of CTLS){
+    const v0 = p[ct.key], cp = caps[ct.key];
+    if (v0==null || !cp || cp.max==null) continue;
+    // Un valor de un modo que quedó en automático no se fuerza
+    if (ct.mode && p[ct.mode] && p[ct.mode]!=='manual') continue;
+    const v = Math.min(cp.max, Math.max(cp.min, v0)), c = {[ct.key]:v};
+    if (ct.mode && p[ct.mode]==='manual') c[ct.mode] = 'manual';
+    await applyOne(c);
+    if (!near(ct.key, v, settings()[ct.key])) failed.push(ct.key);
   }
   refreshChips();
+  return [...new Set(failed)].map(k => LABEL_OF[k] || k);
+}
+// Valores fijos por defecto cuando no hay preset: 1/60 s, ISO 200, 5000 K, foco donde esté
+function defaultPreset(){
+  const p = {exposureMode:'manual', exposureTime:1e4/60, iso:200, whiteBalanceMode:'manual', colorTemperature:5000, focusMode:'manual'};
+  const fd = settings().focusDistance; if (fd!=null) p.focusDistance = fd;
+  return p;
+}
+// Ajustes actuales con exposición, balance y foco pasados a manual donde la cámara lo permite
+function manualPreset(){
+  const st = settings(), p = {};
+  MODES.forEach(m => { if (caps[m]?.includes('manual')) p[m] = 'manual'; else if (st[m]) p[m] = st[m]; });
+  CTLS.forEach(ct => { if (caps[ct.key] && st[ct.key]!=null) p[ct.key] = st[ct.key]; });
+  return p;
+}
+function reportFixed(failed, okMsg){
+  const noManual = MODES.filter(m => !caps[m]?.includes('manual')).map(m => LABEL_OF[m]);
+  const all = [...new Set([...noManual, ...failed])];
+  setStatus(all.length ? okMsg+' La cámara no aceptó: '+all.join(', ')+'.' : okMsg, all.length ? 'warn' : 'ok');
+}
+async function lockCurrent(){
+  if (!MODES.some(m => caps[m]?.includes('manual'))){ setStatus('Esta cámara no admite modo manual desde el navegador.', 'bad'); refreshChips(); return; }
+  reportFixed(await applyPreset(manualPreset()), 'Ajustes actuales fijados en manual.');
 }
 function currentPreset(){
   const st = settings(), p = {};
   MODES.forEach(m => { if (st[m]) p[m] = st[m]; });
   CTLS.forEach(ct => { if (caps[ct.key] && st[ct.key]!=null) p[ct.key] = st[ct.key]; });
   return p;
-}
-async function applyPreset(p){
-  const c = {};
-  Object.entries(p).forEach(([k,v]) => {
-    if (MODES.includes(k)){ if (caps[k]?.includes(v)) c[k] = v; }
-    else if (caps[k]) c[k] = Math.min(caps[k].max, Math.max(caps[k].min, v));
-  });
-  const ok = await apply(c);
-  refreshChips();
-  return ok;
 }
 function showPreset(){
   const p = cleanPreset(store.get('preset', null));
@@ -358,9 +395,10 @@ async function start(){
     $('camInfo').textContent = `${track.label || 'Cámara'} · ${video.videoWidth}×${video.videoHeight}`;
     $('btnStart').textContent = 'Detener cámara';
     setCamButtons(true); buildControls(); placeRoi();
+    // Siempre se inicia en manual: con el preset guardado o, si no hay, con los valores fijos por defecto
     const p = cleanPreset(store.get('preset', null));
-    if (p){ if (await applyPreset(p)) setStatus('Preset guardado aplicado automáticamente.', 'ok'); }
-    else setStatus('Cámara en modo automático. Encuadra la muestra y pulsa “Fijar ajustes actuales”.', 'warn');
+    if (p) reportFixed(await applyPreset(p), 'Preset aplicado: cámara en manual.');
+    else reportFixed(await applyPreset(defaultPreset()), 'Cámara en manual con valores fijos (1/60 s, ISO 200, 5000 K). Ajusta exposición e ISO si se ve oscura o clara y pulsa Guardar preset.');
     refreshChips(); loop();
   } finally { starting = false; $('btnStart').disabled = false; }
 }
@@ -623,11 +661,16 @@ $('btnTorch').addEventListener('click', async () => {
   const want = !torchOn;
   if (await apply({torch:want})){ torchOn = want; $('btnTorch').textContent = torchOn ? 'Apagar linterna' : 'Linterna'; }
 });
-$('btnSavePreset').addEventListener('click', () => { store.set('preset', currentPreset()); showPreset(); setStatus('Preset guardado. Se aplicará cada vez que inicies la cámara.', 'ok'); });
+// El preset siempre se guarda en manual, aunque la cámara esté en automático al pulsar
+$('btnSavePreset').addEventListener('click', async () => {
+  const p = manualPreset();
+  store.set('preset', p); showPreset();
+  reportFixed(await applyPreset(p), 'Preset guardado en manual. Se aplicará cada vez que inicies la cámara.');
+});
 $('btnApplyPreset').addEventListener('click', async () => {
   const p = cleanPreset(store.get('preset', null));
   if (!p){ setStatus('No hay preset guardado.', 'warn'); return; }
-  if (await applyPreset(p)) setStatus('Preset aplicado.', 'ok');
+  reportFixed(await applyPreset(p), 'Preset aplicado.');
 });
 $('btnAuto').addEventListener('click', async () => {
   const c = {}; MODES.forEach(m => { if (caps[m]?.includes('continuous')) c[m] = 'continuous'; });

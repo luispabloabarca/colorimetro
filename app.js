@@ -20,7 +20,7 @@ const isObj = v => v && typeof v === 'object' && !Array.isArray(v);
 
 const CTLS = [
   {key:'exposureTime', mode:'exposureMode', label:'Tiempo de exposición', fmt:v=>`${(v/10).toFixed(1)} ms`},
-  {key:'iso', label:'ISO', fmt:v=>Math.round(v)},
+  {key:'iso', mode:'exposureMode', label:'ISO', fmt:v=>Math.round(v)},
   {key:'colorTemperature', mode:'whiteBalanceMode', label:'Balance de blancos', fmt:v=>`${Math.round(v)} K`},
   {key:'focusDistance', mode:'focusMode', label:'Distancia de foco', fmt:v=>`${(+v).toFixed(2)} m`},
   {key:'exposureCompensation', label:'Compensación de exposición', fmt:v=>`${(+v).toFixed(1)} EV`},
@@ -110,34 +110,78 @@ const ONE = [1,1,1];
 let CL = new Float32Array(0);
 function packClasses(){ CL = new Float32Array(classes.length*3); classes.forEach((c,i) => CL.set(c.lab, i*3)); }
 
-/* ---------- Análisis del recuadro ---------- */
-// El visor es 4:3 con object-fit:cover, así que el recuadro se calcula sobre la parte visible del video.
+/* ---------- Zona de medición ---------- */
+const cleanLab = v => Array.isArray(v) && v.length===3 && v.every(Number.isFinite) ? v : null;
+let roiShape = store.get('roiShape', 'ellipse')==='rect' ? 'rect' : 'ellipse';
+let roiAspect = num(store.get('roiAspect', 1), 1, 0.2, 5);        // ancho / alto
+let bg = cleanLab(store.get('bg', null));                           // color del fondo en L*a*b*
+let bgDE = num(store.get('bgDE', 15), 15, 1, 100);
+let showMask = store.get('showMask', true) !== false;
+
+// Tamaño de la zona dentro de un área W×H: el lado mayor es un % del lado menor del visor
+function roiBox(W, H){
+  const s = Math.min(W, H) * (+$('roiSize').value/100);
+  return roiAspect>=1 ? {w:s, h:s/roiAspect} : {w:s*roiAspect, h:s};
+}
+// El visor es 4:3 con object-fit:cover, así que la zona se calcula sobre la parte visible del video.
 function roiRect(vw, vh){
-  const pct = +$('roiSize').value/100, scale = Math.max(4/vw, 3/vh), s = 3*pct/scale;
-  return {x:(vw-s)/2, y:(vh-s)/2, s};
+  const scale = Math.max(4/vw, 3/vh), b = roiBox(4, 3), w = b.w/scale, h = b.h/scale;
+  return {x:(vw-w)/2, y:(vh-h)/2, w, h};
 }
 function placeRoi(){
   const v = $('viewer').getBoundingClientRect(); if (!v.width) return;
-  const s = Math.min(v.width, v.height) * (+$('roiSize').value/100), el = $('roi');
-  el.style.width = el.style.height = s+'px'; el.style.left = (v.width-s)/2+'px'; el.style.top = (v.height-s)/2+'px';
+  const b = roiBox(v.width, v.height), el = $('roi');
+  el.style.width = b.w+'px'; el.style.height = b.h+'px';
+  el.style.left = (v.width-b.w)/2+'px'; el.style.top = (v.height-b.h)/2+'px';
+  el.style.borderRadius = roiShape==='ellipse' ? '50%' : '4px';
 }
+let mask = null, maskKey = '';
+function getMask(cw, ch){
+  const key = cw+'x'+ch+roiShape; if (key===maskKey) return mask;
+  mask = new Uint8Array(cw*ch);
+  if (roiShape==='rect') mask.fill(1);
+  else {
+    const rx = cw/2, ry = ch/2;
+    for (let y=0; y<ch; y++){ const dy=(y+0.5-ry)/ry; for (let x=0; x<cw; x++){ const dx=(x+0.5-rx)/rx; mask[y*cw+x] = dx*dx+dy*dy<=1 ? 1 : 0; } }
+  }
+  maskKey = key; return mask;
+}
+// Copia la zona del cuadro actual a un canvas pequeño (lado mayor ≤ maxSide px)
+function grab(maxSide){
+  const vw = video.videoWidth, vh = video.videoHeight; if (!vw || !vh) return null;
+  const r = roiRect(vw, vh), k = Math.min(1, maxSide/Math.max(r.w, r.h));
+  const cw = Math.max(4, Math.round(r.w*k)), ch = Math.max(4, Math.round(r.h*k));
+  if (work.width!==cw || work.height!==ch){ work.width = cw; work.height = ch; }
+  wctx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, cw, ch);
+  return {d:wctx.getImageData(0, 0, cw, ch).data, cw, ch, m:getMask(cw, ch)};
+}
+
+/* ---------- Análisis ---------- */
 const PTS_MAX = 1500, ptsAB = new Float32Array(PTS_MAX*2), ptsRGB = new Uint8Array(PTS_MAX*3);
 let ptsN = 0;
 const labTmp = [0,0,0];
-function analyzeFrame(){
-  const vw = video.videoWidth, vh = video.videoHeight; if (!vw || !vh) return null;
-  const r = roiRect(vw, vh), s = Math.max(4, Math.round(Math.min(r.s, 160)));
-  if (work.width !== s){ work.width = s; work.height = s; }
-  wctx.drawImage(video, r.x, r.y, r.s, r.s, 0, 0, s, s);
-  const d = wctx.getImageData(0, 0, s, s).data;
+// Código por píxel para la máscara: 0 muestra, 1 fuera de la zona, 2 fondo, 3 saturado/oscuro, 4 fuera de clase
+let ovCodes = new Uint8Array(0), ovW = 0, ovH = 0;
+function analyzeFrame(useBg = true){
+  const gr = grab(160); if (!gr) return null;
+  const {d, cw, ch, m} = gr, size = cw*ch;
+  if (ovCodes.length!==size) ovCodes = new Uint8Array(size);
+  ovW = cw; ovH = ch;
   const g = white || ONE, nC = classes.length, maxDE2 = maxDE*maxDE, lab = labTmp;
-  const counts = new Array(nC).fill(0), total = s*s, step = Math.max(1, Math.ceil(total/PTS_MAX));
-  let n=0, clipped=0, unclass=0, sL=0, sA=0, sB=0, sLL=0;
+  const B0 = useBg ? bg : null, bgDE2 = bgDE*bgDE;
+  const counts = new Array(nC).fill(0), step = Math.max(1, Math.ceil(size/PTS_MAX));
+  let total=0, n=0, clipped=0, unclass=0, back=0, sL=0, sA=0, sB=0, sLL=0;
   ptsN = 0;
   for (let i=0, p=0; i<d.length; i+=4, p++){
+    if (!m[p]){ ovCodes[p]=1; continue; }
+    total++;
     const R=d[i], G=d[i+1], B=d[i+2];
-    if (R>=250||G>=250||B>=250||(R<4&&G<4&&B<4)){ clipped++; continue; }
+    if (R>=250||G>=250||B>=250||(R<4&&G<4&&B<4)){ clipped++; ovCodes[p]=3; continue; }
     linToLab(Math.min(1,LIN[R]*g[0]), Math.min(1,LIN[G]*g[1]), Math.min(1,LIN[B]*g[2]), lab);
+    if (B0){
+      const dl=lab[0]-B0[0], da=lab[1]-B0[1], db=lab[2]-B0[2];
+      if (dl*dl+da*da+db*db<=bgDE2){ back++; ovCodes[p]=2; continue; }
+    }
     n++; sL+=lab[0]; sA+=lab[1]; sB+=lab[2]; sLL+=lab[0]*lab[0];
     if (p%step===0 && ptsN<PTS_MAX){
       ptsAB[ptsN*2]=lab[1]; ptsAB[ptsN*2+1]=lab[2];
@@ -148,9 +192,9 @@ function analyzeFrame(){
       const dl=lab[0]-CL[o], da=lab[1]-CL[o+1], db=lab[2]-CL[o+2], dd=dl*dl+da*da+db*db;
       if (dd<bd){ bd=dd; best=c; }
     }
-    if (best>=0 && bd<=maxDE2) counts[best]++; else unclass++;
+    if (best>=0 && bd<=maxDE2){ counts[best]++; ovCodes[p]=0; } else { unclass++; ovCodes[p]=4; }
   }
-  return {n, clipped, unclass, counts, sL, sA, sB, sLL, total};
+  return {n, clipped, unclass, back, counts, sL, sA, sB, sLL, total};
 }
 function summarize(acc){
   if (!acc || !acc.n) return null;
@@ -160,13 +204,27 @@ function summarize(acc){
   const classified = acc.counts.reduce((x,y)=>x+y, 0);
   const pct = acc.counts.map(c => classified ? c/classified*100 : 0);
   const score = classified>0 ? acc.counts.reduce((s,c,i)=>s+c*classes[i].w, 0)/classified : null;
-  return {L, a, b, C, h:hh, sd, pct, score, n:acc.n, clipped:acc.clipped, unclass:acc.unclass, total:acc.total};
+  return {L, a, b, C, h:hh, sd, pct, score, n:acc.n, clipped:acc.clipped, unclass:acc.unclass, back:acc.back, total:acc.total};
 }
 function mergeAcc(A, B){
   if (!A) return {...B, counts:B.counts.slice()};
-  ['n','clipped','unclass','sL','sA','sB','sLL','total'].forEach(k => A[k]+=B[k]);
+  ['n','clipped','unclass','back','sL','sA','sB','sLL','total'].forEach(k => A[k]+=B[k]);
   B.counts.forEach((c,i) => A.counts[i]+=c);
   return A;
+}
+
+/* ---------- Máscara sobre la imagen ---------- */
+const ovCanvas = $('roiMask'), ovCtx = ovCanvas.getContext('2d');
+const OV_RGBA = [[0,0,0,0],[0,0,0,0],[40,120,255,150],[255,40,40,180],[255,200,0,140]];
+let ovImg = null;
+function drawOverlay(){
+  ovCanvas.hidden = !showMask || !running;
+  if (ovCanvas.hidden || !ovW) return;
+  if (ovCanvas.width!==ovW || ovCanvas.height!==ovH){ ovCanvas.width = ovW; ovCanvas.height = ovH; ovImg = null; }
+  if (!ovImg) ovImg = ovCtx.createImageData(ovW, ovH);
+  const o = ovImg.data;
+  for (let p=0, q=0; p<ovW*ovH; p++, q+=4){ const c = OV_RGBA[ovCodes[p]]; o[q]=c[0]; o[q+1]=c[1]; o[q+2]=c[2]; o[q+3]=c[3]; }
+  ovCtx.putImageData(ovImg, 0, 0);
 }
 
 /* ---------- Render ---------- */
@@ -197,9 +255,10 @@ function render(sum){
   });
   const pi = $('pixInfo');
   if (sum){
-    const unPct = sum.unclass/sum.n*100, clipPct = sum.clipped/sum.total*100;
-    pi.textContent = `${sum.n} píxeles válidos · ${fmt(unPct,0)}% fuera de clase · ${fmt(clipPct,0)}% saturados u oscuros (excluidos)`;
-    pi.className = 'small ' + (clipPct>10 || unPct>25 ? 'status warn' : 'muted');
+    const unPct = sum.unclass/sum.n*100, clipPct = sum.clipped/sum.total*100, prodPct = sum.n/sum.total*100;
+    pi.textContent = `Zona: ${fmt(prodPct,0)}% muestra` + (bg ? ` · ${fmt(sum.back/sum.total*100,0)}% fondo` : '') +
+      ` · ${fmt(clipPct,0)}% saturado u oscuro. De la muestra, ${fmt(unPct,0)}% fuera de clase.`;
+    pi.className = 'small ' + (clipPct>10 || unPct>25 || prodPct<20 ? 'status warn' : 'muted');
   } else pi.textContent = '';
   if (isShown('plot')) drawPlot();
 }
@@ -231,7 +290,7 @@ function drawPlot(){
 /* ---------- Bucle en vivo ---------- */
 function loop(){
   if (!running) return;
-  if (!busy){ lastSum = summarize(analyzeFrame()); render(lastSum); }
+  if (!busy){ lastSum = summarize(analyzeFrame()); render(lastSum); drawOverlay(); }
   timer = setTimeout(loop, 200);
 }
 // requestVideoFrameCallback no se dispara si el visor está oculto: se combina con un tiempo máximo
@@ -239,9 +298,9 @@ const nextFrame = () => new Promise(r => {
   const t = setTimeout(r, 120);
   if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(() => { clearTimeout(t); r(); });
 });
-async function averaged(frames){
+async function averaged(frames, useBg = true){
   busy = true; let acc = null;
-  try{ for (let i=0; i<frames; i++){ await nextFrame(); const a = analyzeFrame(); if (a) acc = mergeAcc(acc, a); } }
+  try{ for (let i=0; i<frames; i++){ await nextFrame(); const a = analyzeFrame(useBg); if (a) acc = mergeAcc(acc, a); } }
   finally{ busy = false; }
   return acc;
 }
@@ -271,7 +330,6 @@ function buildControls(){
     inp.addEventListener('change', async () => {
       const c = {[ct.key]: +inp.value};
       if (ct.mode && caps[ct.mode]?.includes('manual')) c[ct.mode] = 'manual';
-      if (ct.key==='iso' && caps.exposureMode?.includes('manual')) c.exposureMode = 'manual';
       if (await apply(c)) setStatus(`${ct.label} fijado en ${ct.fmt(+inp.value)}`, 'ok');
       refreshChips();
     });
@@ -290,17 +348,58 @@ function refreshChips(){
     if (i && st[ct.key]!=null){ i.value = st[ct.key]; $('ctl_'+ct.key+'_o').textContent = ct.fmt(+st[ct.key]); }
   });
 }
-async function lockCurrent(){
-  const st = settings(), c = {};
-  if (caps.exposureMode?.includes('manual')){ c.exposureMode='manual'; if (st.exposureTime!=null&&caps.exposureTime) c.exposureTime=st.exposureTime; if (st.iso!=null&&caps.iso) c.iso=st.iso; }
-  if (caps.whiteBalanceMode?.includes('manual')){ c.whiteBalanceMode='manual'; if (st.colorTemperature!=null&&caps.colorTemperature) c.colorTemperature=st.colorTemperature; }
-  if (caps.focusMode?.includes('manual')){ c.focusMode='manual'; if (st.focusDistance!=null&&caps.focusDistance) c.focusDistance=st.focusDistance; }
-  if (!Object.keys(c).length){ setStatus('Esta cámara no admite modo manual desde el navegador.', 'bad'); return; }
-  if (await apply(c)){
-    const miss = MODES.filter(m => !caps[m]?.includes('manual')).map(m => ({exposureMode:'exposición', whiteBalanceMode:'balance de blancos', focusMode:'foco'}[m]));
-    setStatus('Ajustes fijados.'+(miss.length ? ' No se pudo fijar: '+miss.join(', ')+'.' : ''), miss.length ? 'warn' : 'ok');
+/* Chrome descarta en silencio un bloque "advanced" completo si el equipo no acepta uno solo de sus
+   valores. Por eso cada ajuste se aplica por separado y se verifica leyendo getSettings(). */
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const LABEL_OF = {exposureMode:'modo de exposición', whiteBalanceMode:'modo de balance de blancos', focusMode:'modo de foco',
+  ...Object.fromEntries(CTLS.map(c => [c.key, c.label.toLowerCase()]))};
+async function applyOne(c){
+  if (!track) return false;
+  try{ await track.applyConstraints({advanced:[c]}); }catch{ return false; }
+  await wait(120);
+  return true;
+}
+function near(key, want, got){
+  if (got==null) return false;
+  const tol = Math.max(caps[key]?.step || 0, Math.abs(want)*0.03, 1e-6);
+  return Math.abs(got-want) <= tol;
+}
+// Devuelve la lista de ajustes que la cámara no aceptó
+async function applyPreset(p){
+  const failed = [];
+  for (const m of MODES){
+    if (!p[m]) continue;
+    if (!caps[m]?.includes(p[m])){ if (p[m]==='manual') failed.push(m); continue; }
+    await applyOne({[m]:p[m]});
+    if (settings()[m]!==p[m]) failed.push(m);
+  }
+  for (const ct of CTLS){
+    const v0 = p[ct.key], cp = caps[ct.key];
+    if (v0==null || !cp || cp.max==null) continue;
+    // Un valor que pertenece a un modo automático no se fuerza (p. ej. tiempo de exposición con exposición en auto)
+    if (ct.mode && p[ct.mode] && p[ct.mode]!=='manual') continue;
+    const v = Math.min(cp.max, Math.max(cp.min, v0)), c = {[ct.key]:v};
+    if (ct.mode && p[ct.mode]==='manual') c[ct.mode] = 'manual';
+    await applyOne(c);
+    if (!near(ct.key, v, settings()[ct.key])) failed.push(ct.key);
   }
   refreshChips();
+  return [...new Set(failed)].map(k => LABEL_OF[k] || k);
+}
+// Ajustes actuales con exposición, balance y foco pasados a manual donde la cámara lo permite
+function manualPreset(){
+  const st = settings(), p = {};
+  MODES.forEach(m => { if (caps[m]?.includes('manual')) p[m] = 'manual'; else if (st[m]) p[m] = st[m]; });
+  CTLS.forEach(ct => { if (caps[ct.key] && st[ct.key]!=null) p[ct.key] = st[ct.key]; });
+  return p;
+}
+async function lockCurrent(){
+  if (!MODES.some(m => caps[m]?.includes('manual'))){ setStatus('Esta cámara no admite modo manual desde el navegador.', 'bad'); refreshChips(); return false; }
+  const failed = await applyPreset(manualPreset());
+  const noManual = MODES.filter(m => !caps[m]?.includes('manual')).map(m => LABEL_OF[m]);
+  const all = [...new Set([...noManual, ...failed])];
+  setStatus(all.length ? 'Ajustes fijados, excepto: '+all.join(', ')+'.' : 'Exposición, balance de blancos y foco fijados en manual.', all.length ? 'warn' : 'ok');
+  return !all.length;
 }
 function currentPreset(){
   const st = settings(), p = {};
@@ -308,21 +407,11 @@ function currentPreset(){
   CTLS.forEach(ct => { if (caps[ct.key] && st[ct.key]!=null) p[ct.key] = st[ct.key]; });
   return p;
 }
-async function applyPreset(p){
-  const c = {};
-  Object.entries(p).forEach(([k,v]) => {
-    if (MODES.includes(k)){ if (caps[k]?.includes(v)) c[k] = v; }
-    else if (caps[k]) c[k] = Math.min(caps[k].max, Math.max(caps[k].min, v));
-  });
-  const ok = await apply(c);
-  refreshChips();
-  return ok;
-}
 function showPreset(){
   const p = cleanPreset(store.get('preset', null));
   $('presetInfo').textContent = p ? 'Preset guardado: '+Object.entries(p).map(([k,v]) => `${k}=${typeof v==='number' ? +v.toFixed(3) : v}`).join(' · ') : 'Sin preset guardado.';
 }
-const CAM_BTNS = ['btnLock','btnMeasure','btnWhite','btnSavePreset','btnApplyPreset','btnAuto'];
+const CAM_BTNS = ['btnLock','btnMeasure','btnWhite','btnSavePreset','btnApplyPreset','btnAuto','btnBg'];
 function setCamButtons(on){
   CAM_BTNS.forEach(id => $(id).disabled = !on);
   $('btnTorch').disabled = !(on && caps.torch);
@@ -344,11 +433,17 @@ async function start(){
     $('msg').hidden = true; running = true;
     $('camInfo').textContent = `${track.label || 'Cámara'} · ${video.videoWidth}×${video.videoHeight}`;
     $('btnStart').textContent = 'Detener cámara';
-    setCamButtons(true); buildControls(); placeRoi();
+    setCamButtons(true); buildControls(); placeRoi(); refreshChips(); loop();
     const p = cleanPreset(store.get('preset', null));
-    if (p){ if (await applyPreset(p)) setStatus('Preset guardado aplicado automáticamente.', 'ok'); }
-    else setStatus('Cámara en modo automático. Encuadra la muestra y pulsa “Fijar ajustes actuales”.', 'warn');
-    refreshChips(); loop();
+    if (p){
+      const failed = await applyPreset(p);
+      setStatus(failed.length ? 'Preset aplicado, pero la cámara no aceptó: '+failed.join(', ')+'.' : 'Preset aplicado: cámara en manual.', failed.length ? 'warn' : 'ok');
+    } else if ($('autoLock').checked){
+      // Sin preset: se deja que el automático se estabilice y luego se congela
+      setStatus('Estabilizando exposición y balance de blancos…');
+      await wait(2000);
+      if (running) await lockCurrent();
+    } else setStatus('Cámara en automático. Encuadra la muestra y pulsa “Fijar ajustes actuales”.', 'warn');
   } finally { starting = false; $('btnStart').disabled = false; }
 }
 function stop(){
@@ -357,7 +452,7 @@ function stop(){
   video.srcObject = null;
   $('msg').hidden = false; $('btnStart').textContent = 'Iniciar cámara'; $('btnTorch').textContent = 'Linterna';
   $('camInfo').textContent = 'Cámara detenida'; $('chips').replaceChildren();
-  setCamButtons(false);
+  setCamButtons(false); drawOverlay();
 }
 
 /* ---------- Clases ---------- */
@@ -417,10 +512,9 @@ $('btnWhite').addEventListener('click', async () => {
     let r=0, g=0, b=0, n=0;
     for (let k=0; k<10; k++){
       await nextFrame();
-      const R = roiRect(video.videoWidth, video.videoHeight), s = Math.max(4, Math.round(Math.min(120, R.s)));
-      work.width = work.height = s; wctx.drawImage(video, R.x, R.y, R.s, R.s, 0, 0, s, s);
-      const d = wctx.getImageData(0, 0, s, s).data;
-      for (let i=0; i<d.length; i+=4){ if (d[i]>=250||d[i+1]>=250||d[i+2]>=250) continue; r+=LIN[d[i]]; g+=LIN[d[i+1]]; b+=LIN[d[i+2]]; n++; }
+      const gr = grab(120); if (!gr) continue;
+      const {d, m} = gr;
+      for (let i=0, p=0; i<d.length; i+=4, p++){ if (!m[p] || d[i]>=250||d[i+1]>=250||d[i+2]>=250) continue; r+=LIN[d[i]]; g+=LIN[d[i+1]]; b+=LIN[d[i+2]]; n++; }
     }
     if (n<100 || !r || !g || !b){ setStatus('El blanco está saturado o muy oscuro. Ajusta la exposición e intenta de nuevo.', 'bad'); return; }
     r/=n; g/=n; b/=n;
@@ -432,6 +526,41 @@ $('btnWhite').addEventListener('click', async () => {
   } finally { busy = false; }
 });
 $('btnWhiteReset').addEventListener('click', () => { white = null; store.set('white', null); showWhite(); });
+
+/* ---------- Forma de la zona y fondo ---------- */
+// La proporción se maneja en escala logarítmica para que 1:2 y 2:1 queden a la misma distancia del centro
+function showAspect(){
+  const a = roiAspect;
+  $('roiAspectO').textContent = Math.abs(a-1)<0.03 ? '1 : 1' : a>1 ? `${a.toFixed(1)} : 1` : `1 : ${(1/a).toFixed(1)}`;
+}
+function roiChanged(){ placeRoi(); maskKey = ''; showAspect(); }
+$('roiShape').value = roiShape;
+$('roiShape').addEventListener('change', () => { roiShape = $('roiShape').value==='rect' ? 'rect' : 'ellipse'; store.set('roiShape', roiShape); roiChanged(); });
+$('roiAspect').value = Math.log2(roiAspect);
+$('roiAspect').addEventListener('input', () => {
+  roiAspect = num(2 ** +$('roiAspect').value, 1, 0.2, 5);
+  if (Math.abs(Math.log2(roiAspect)) < 0.06){ roiAspect = 1; }
+  store.set('roiAspect', roiAspect); roiChanged();
+});
+$('btnAspect1').addEventListener('click', () => { roiAspect = 1; $('roiAspect').value = 0; store.set('roiAspect', 1); roiChanged(); });
+function showBg(){
+  const sw = $('bgSwatch');
+  sw.style.background = bg ? labToHex(...bg) : 'transparent';
+  $('bgInfo').textContent = bg ? `L* ${fmt(bg[0])} · a* ${fmt(bg[1])} · b* ${fmt(bg[2])}` : 'sin fondo: se mide toda la zona';
+}
+$('btnBg').addEventListener('click', async () => {
+  const s = summarize(await averaged(10, false));
+  if (!s){ setStatus('No hay píxeles válidos en la zona para tomar el fondo.', 'bad'); return; }
+  bg = [s.L, s.a, s.b].map(x => Math.round(x*10)/10); store.set('bg', bg); showBg();
+  setStatus('Fondo capturado. Lo marcado en azul no se cuenta en la medición.', 'ok');
+});
+$('btnBgReset').addEventListener('click', () => { bg = null; store.set('bg', null); showBg(); });
+$('bgDE').value = bgDE;
+$('bgDE').addEventListener('change', () => { bgDE = num($('bgDE').value, 15, 1, 100); $('bgDE').value = bgDE; store.set('bgDE', bgDE); });
+$('showMask').checked = showMask;
+$('showMask').addEventListener('change', () => { showMask = $('showMask').checked; store.set('showMask', showMask); drawOverlay(); });
+$('autoLock').checked = store.get('autoLock', true) !== false;
+$('autoLock').addEventListener('change', () => store.set('autoLock', $('autoLock').checked));
 
 /* ---------- Registro ---------- */
 const logNames = () => [...new Set(log.flatMap(r => Object.keys(r.pct)))];
@@ -487,11 +616,11 @@ $('btnCsv').addEventListener('click', () => {
 });
 
 /* ---------- Bloques y vistas ---------- */
-const BLOCKS = ['viewer','live','plot','classes','white','camera','log'];
+const BLOCKS = ['viewer','roi','live','plot','classes','white','camera','log'];
 const BUILTIN = {
-  'Medición': {order:['viewer','live','plot','classes','log','white','camera'], hidden:['classes','log','white','camera']},
-  'Ajustes':  {order:['viewer','camera','white','classes','live','plot','log'], hidden:['live','plot','log']},
-  'Registro': {order:['viewer','live','log','plot','classes','white','camera'], hidden:['plot','classes','white','camera']},
+  'Medición': {order:['viewer','live','plot','roi','classes','log','white','camera'], hidden:['roi','classes','log','white','camera']},
+  'Ajustes':  {order:['viewer','roi','camera','white','classes','live','plot','log'], hidden:['live','plot','log']},
+  'Registro': {order:['viewer','live','log','roi','plot','classes','white','camera'], hidden:['roi','plot','classes','white','camera']},
   'Todo':     {order:BLOCKS.slice(), hidden:[]},
 };
 const cleanIds = v => Array.isArray(v) ? [...new Set(v.filter(b => BLOCKS.includes(b)))] : [];
@@ -610,11 +739,18 @@ $('btnTorch').addEventListener('click', async () => {
   const want = !torchOn;
   if (await apply({torch:want})){ torchOn = want; $('btnTorch').textContent = torchOn ? 'Apagar linterna' : 'Linterna'; }
 });
-$('btnSavePreset').addEventListener('click', () => { store.set('preset', currentPreset()); showPreset(); setStatus('Preset guardado. Se aplicará cada vez que inicies la cámara.', 'ok'); });
+// El preset siempre se guarda en manual: guardar con la cámara en automático no sirve para medir
+$('btnSavePreset').addEventListener('click', async () => {
+  const p = manualPreset();
+  store.set('preset', p); showPreset();
+  const failed = await applyPreset(p);
+  setStatus(failed.length ? 'Preset guardado, pero la cámara no aceptó: '+failed.join(', ')+'.' : 'Preset guardado en manual. Se aplicará cada vez que inicies la cámara.', failed.length ? 'warn' : 'ok');
+});
 $('btnApplyPreset').addEventListener('click', async () => {
   const p = cleanPreset(store.get('preset', null));
   if (!p){ setStatus('No hay preset guardado.', 'warn'); return; }
-  if (await applyPreset(p)) setStatus('Preset aplicado.', 'ok');
+  const failed = await applyPreset(p);
+  setStatus(failed.length ? 'Preset aplicado, pero la cámara no aceptó: '+failed.join(', ')+'.' : 'Preset aplicado.', failed.length ? 'warn' : 'ok');
 });
 $('btnAuto').addEventListener('click', async () => {
   const c = {}; MODES.forEach(m => { if (caps[m]?.includes('continuous')) c[m] = 'continuous'; });
@@ -632,5 +768,5 @@ document.addEventListener('visibilitychange', () => {
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { readTheme(); drawPlot(); });
 
 readTheme(); packClasses(); buildDist(); setupBlocks(); applyLayout();
-renderClasses(); renderLog(); showWhite(); showPreset(); render(null);
+renderClasses(); renderLog(); showWhite(); showPreset(); showBg(); showAspect(); render(null);
 })();
